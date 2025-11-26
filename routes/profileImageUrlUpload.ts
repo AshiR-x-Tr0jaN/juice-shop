@@ -1,8 +1,3 @@
-/*
- * Copyright (c) 2014-2026 Bjoern Kimminich & the OWASP Juice Shop contributors.
- * SPDX-License-Identifier: MIT
- */
-
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { finished } from 'node:stream/promises'
@@ -16,34 +11,54 @@ import logger from '../lib/logger'
 export function profileImageUrlUpload () {
   return async (req: Request, res: Response, next: NextFunction) => {
     if (req.body.imageUrl !== undefined) {
-      const url = req.body.imageUrl
-      if (url.match(/(.)*solve\/challenges\/server-side(.)*/) !== null) req.app.locals.abused_ssrf_bug = true
-      const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
-      if (loggedInUser) {
-        try {
-          const response = await fetch(url)
-          if (!response.ok || !response.body) {
-            throw new Error('url returned a non-OK status code or an empty body')
-          }
-          const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(url.split('.').slice(-1)[0].toLowerCase()) ? url.split('.').slice(-1)[0].toLowerCase() : 'jpg'
-          const fileStream = fs.createWriteStream(`frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`, { flags: 'w' })
-          await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
-          await UserModel.findByPk(loggedInUser.data.id).then(async (user: UserModel | null) => { return await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` }) }).catch((error: Error) => { next(error) })
-        } catch (error) {
-          try {
-            const user = await UserModel.findByPk(loggedInUser.data.id)
-            await user?.update({ profileImage: url })
-            logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}; using image link directly`)
-          } catch (error) {
-            next(error)
-            return
-          }
+      try {
+        const url = new URL(req.body.imageUrl)
+
+        // ✅ Whitelist protocols
+        const allowedProtocols = ['http:', 'https:']
+        if (!allowedProtocols.includes(url.protocol)) {
+          res.status(400).send('INVALID_URL_PROTOCOL')
+          return
         }
-      } else {
-        next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
+
+        // ✅ Whitelist domains (replace with your trusted domains)
+        const allowedDomains = ['trustedsite.com', 'cdn.trustedsite.com']
+        if (!allowedDomains.includes(url.hostname)) {
+          res.status(400).send('INVALID_URL_DOMAIN')
+          return
+        }
+
+        const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
+        if (!loggedInUser) {
+          next(new Error('Blocked illegal activity by ' + req.socket.remoteAddress))
+          return
+        }
+
+        // Fetch the image safely
+        const response = await fetch(url.toString())
+        if (!response.ok || !response.body) {
+          throw new Error('URL returned a non-OK status code or empty body')
+        }
+
+        // Determine file extension
+        const ext = ['jpg', 'jpeg', 'png', 'svg', 'gif'].includes(url.pathname.split('.').pop()?.toLowerCase() || '')
+          ? url.pathname.split('.').pop()!.toLowerCase()
+          : 'jpg'
+
+        const filePath = `frontend/dist/frontend/assets/public/images/uploads/${loggedInUser.data.id}.${ext}`
+        const fileStream = fs.createWriteStream(filePath, { flags: 'w' })
+        await finished(Readable.fromWeb(response.body as any).pipe(fileStream))
+
+        const user = await UserModel.findByPk(loggedInUser.data.id)
+        await user?.update({ profileImage: `/assets/public/images/uploads/${loggedInUser.data.id}.${ext}` })
+
+      } catch (error) {
+        logger.warn(`Error retrieving user profile image: ${utils.getErrorMessage(error)}`)
+        res.status(400).send('FAILED_TO_UPLOAD_IMAGE')
         return
       }
     }
+
     res.location(process.env.BASE_PATH + '/profile')
     res.redirect(process.env.BASE_PATH + '/profile')
   }
